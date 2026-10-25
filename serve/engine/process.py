@@ -294,11 +294,7 @@ class ProcessEngine:
         self.batch = int(self.info.get("batch_slots") or 0)
         if asked and self.batch != asked:
             print(f"[server] warning: {asked} parallel requests asked, the engine runs {self.batch or 'one'}", flush=True)
-        groups = int(flag_value(args, "--batch-groups") or 1)
-        groups = groups if self.batch and groups > 0 and self.batch % groups == 0 else 1
-        gs = self.batch // groups if self.batch else 0
-        # slot order that spreads requests over the groups first: 0, gs, 2gs, .., 1, gs+1, ..
-        self.slot_order = [g * gs + t for t in range(gs) for g in range(groups)]
+        self.slot_order = list(range(self.batch))
         self.slot_q = [queue.Queue() for _ in range(self.batch)]
         self.slot_busy = [False] * self.batch
         # tokens each slot holds (for prefix reuse by a conversation's next turn) and when it was last used
@@ -853,6 +849,9 @@ class ProcessEngine:
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
+
+        def gen_keys() -> str:      # a run that continues after tokens were generated tells the grammar where the prompt ends
+            return keys + (f" gprompt={len(ids)}" if out and " grammar=" in keys else "")
         ok = yield from self._take_control(cancel, len(prompt))
         if not ok:
             return
@@ -889,10 +888,10 @@ class ProcessEngine:
                             reserved = solo_slot
                 if alone and left > 1:
                     if solo_slot is not None:
-                        head = f"SGENI {solo_slot} {left}{keys} {embeddings}" if embeddings else \
-                            f"SGEN {solo_slot} {left}{keys}"
+                        head = f"SGENI {solo_slot} {left}{gen_keys()} {embeddings}" if embeddings else \
+                            f"SGEN {solo_slot} {left}{gen_keys()}"
                     else:
-                        head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
+                        head = f"GENI {left}{gen_keys()} {embeddings}" if embeddings else f"GEN {left}{gen_keys()}"
                     self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
                     run0, yield_sent = len(out), False
                     if solo_slot is not None:
@@ -986,7 +985,7 @@ class ProcessEngine:
                     left = max(1, min(left, self.max_context - len(prompt) - SLOT_MARGIN))   # the slot's room
                     while not self.slot_q[slot].empty():
                         self.slot_q[slot].get_nowait()
-                    head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
+                    head = f"BGENI {slot} {left}{gen_keys()} {embeddings}" if embeddings else f"BGEN {slot} {left}{gen_keys()}"
                     self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
                     self.slot_held[slot] = []               # admission overwrites the slot
                     phase = "admit"
